@@ -16,6 +16,7 @@
 const { Readable, Writable, Duplex } = require('stream');
 const portAudioBindings = require("bindings")("naudiodon.node");
 
+// TODO: commenting segfault-handler because of conflict on windows
 //var SegfaultHandler = require('segfault-handler');
 //SegfaultHandler.registerHandler("crash.log");
 
