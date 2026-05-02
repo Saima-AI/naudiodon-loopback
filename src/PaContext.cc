@@ -17,11 +17,22 @@
 #include "Params.h"
 #include "Chunks.h"
 #include <portaudio.h>
+#ifdef _WIN32
+#include <pa_win_wasapi.h>
+#endif
 #include <thread>
 
 namespace streampunk {
 
-int PaCallback(const void *input, void *output, unsigned long frameCount, 
+#ifdef _WIN32
+static void wasapiStateCallback(PaStream* /*stream*/, unsigned int stateFlags,
+                                unsigned int errorId, void* userData) {
+  if (userData)
+    static_cast<PaContext*>(userData)->onWasapiStreamState(stateFlags, errorId);
+}
+#endif
+
+int PaCallback(const void *input, void *output, unsigned long frameCount,
                const PaStreamCallbackTimeInfo *timeInfo, 
                PaStreamCallbackFlags statusFlags, void *userData) {
   PaContext *paContext = (PaContext *)userData;
@@ -106,6 +117,15 @@ PaContext::PaContext(napi_env env, napi_value inOptions, napi_value outOptions)
 
   const PaStreamInfo *streamInfo = Pa_GetStreamInfo(mStream);
   mInLatency = streamInfo->inputLatency;
+
+#ifdef _WIN32
+  // Surface WASAPI device-invalidation events (e.g. user toggling Sound
+  // settings) as stream errors. Without this, the WASAPI worker thread
+  // dies silently and the stream sits open producing no callbacks.
+  // Returns paIncompatibleHostApiSpecificStreamInfo for non-WASAPI streams,
+  // which is fine to ignore.
+  PaWasapi_SetStreamStateHandler(mStream, wasapiStateCallback, this);
+#endif
 }
 
 void PaContext::start(napi_env env) {
@@ -118,6 +138,12 @@ void PaContext::start(napi_env env) {
 }
 
 void PaContext::stop(eStopFlag flag) {
+#ifdef _WIN32
+  // Deregister the WASAPI state handler before tearing down the stream,
+  // so a late-firing callback can't reach a half-destroyed PaContext.
+  if (mStream)
+    PaWasapi_SetStreamStateHandler(mStream, nullptr, nullptr);
+#endif
   if (eStopFlag::ABORT == flag)
     Pa_AbortStream(mStream);
   else
@@ -166,6 +192,27 @@ void PaContext::checkStatus(uint32_t statusFlags) {
     mErrStr = err;
   }
 }
+
+#ifdef _WIN32
+void PaContext::onWasapiStreamState(unsigned int stateFlags, unsigned int errorId) {
+  if (!(stateFlags & paWasapiStreamStateError))
+    return;
+
+  {
+    std::lock_guard<std::mutex> lk(m);
+    if (mErrStr.empty()) {
+      mErrStr = std::string("WASAPI stream invalidated (errorId=")
+              + std::to_string(errorId) + ")";
+    }
+  }
+
+  // Wake any pending read/write so getErrStr() runs and the error
+  // surfaces via the existing closeOnError path. Without this the
+  // ChunkQueue dequeue blocks forever and JS never sees the error.
+  if (mInChunks)  mInChunks->quit();
+  if (mOutChunks) mOutChunks->quit();
+}
+#endif
 
 bool PaContext::getErrStr(std::string& errStr, bool isInput) {
   std::lock_guard<std::mutex> lk(m);

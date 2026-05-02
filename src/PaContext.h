@@ -47,6 +47,10 @@ public:
   void checkStatus(uint32_t statusFlags);
   bool getErrStr(std::string& errStr, bool isInput);
 
+#ifdef _WIN32
+  void onWasapiStreamState(unsigned int stateFlags, unsigned int errorId);
+#endif
+
   void quit();
 
   bool readPaBuffer(const void *srcBuf, uint32_t frameCount, double inTimestamp);
